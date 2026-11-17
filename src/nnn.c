@@ -466,6 +466,17 @@ static char *bmstr;
 static char *pluginstr;
 static char *orderstr;
 static char *opener;
+/* Artemis action state is separate from nnn's keyboard selection buffer. */
+enum fs_action { FS_BROWSE, FS_NANO, FS_MOVE, FS_DELETE, FS_QUIT, FS_CANCEL,
+	FS_HERE, FS_CANCEL_MOVE, FS_ACTION_END };
+static enum fs_action fs_action;
+static bool fs_active = TRUE, fs_delete_confirm;
+static char fs_source[PATH_MAX], fs_target[PATH_MAX];
+static struct stat fs_source_stat, fs_target_stat;
+static const char * const fs_labels[] = {
+	"Browse", "Open in nano", "Select for move", "Delete", "Quit", "Back to browsing",
+	"Move here", "Cancel move"
+};
 static char *editor;
 static char *enveditor;
 static char *pager;
@@ -2423,6 +2434,12 @@ static bool initcurses(void *oldmask)
 	nonl();
 	//intrflush(stdscr, FALSE);
 	keypad(stdscr, TRUE);
+	/* TERM=linux does not consistently define the extended function keys. */
+	define_key("\033[25~", KEY_F(13));
+	define_key("\033[26~", KEY_F(14));
+	define_key("\033[28~", KEY_F(15));
+	define_key("\033[29~", KEY_F(16));
+	define_key("\033[31~", KEY_F(17));
 #ifndef NOMOUSE
 #if NCURSES_MOUSE_VERSION <= 1
 	mousemask(BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON2_PRESSED | BUTTON3_PRESSED,
@@ -2514,7 +2531,8 @@ static bool initcurses(void *oldmask)
 #endif
 
 	settimeout(); /* One second */
-	set_escdelay(25);
+	/* Footswitch sequences may arrive in fragments during screen redraws. */
+	set_escdelay(300);
 	return TRUE;
 }
 
@@ -8029,8 +8047,34 @@ static bool set_time_type(int *presel)
 	return ret;
 }
 
+static void fs_status(void)
+{
+	move(xlines - 2, 0);
+	clrtoeol();
+	if (fs_delete_confirm)
+		addnstr("Permanently delete? FS4 confirm | FS5/FS3 cancel", xcols - 1);
+	else if (fs_source[0]) {
+		addnstr("Moving: ", xcols - 1);
+		addnstr(fs_source, MAX(0, xcols - 10));
+	} else
+		addnstr("FS1 up | FS2 down | FS3 parent | FS4 enter | FS5 actions", xcols - 1);
+	tolastln();
+	if (fs_action != FS_BROWSE) {
+		addnstr(fs_labels[fs_action], xcols - 1);
+		addnstr(" | FS4 accept | FS5 next", MAX(0, xcols - 1 - (int)strlen(fs_labels[fs_action])));
+	} else
+		addnstr(fs_source[0] ? "Browse to destination, then FS5: Move here"
+			: "Select an entry; FS5 cycles file operations", xcols - 1);
+	clrtoeol();
+	tocursor();
+}
+
 static void statusbar(char *path)
 {
+	if (fs_active) {
+		fs_status();
+		return;
+	}
 	int i = 0, len = 0;
 	char *ptr;
 	pEntry pent = &pdents[cur];
@@ -8640,6 +8684,8 @@ static void showselsize(const char *path)
 	printmsg(coolsize(cfg.blkorder ? sz << blk_shift : sz));
 }
 
+#include "footswitch.h"
+
 static bool init_browse_context(char *ipath, char **path, char **lastdir, char **lastname)
 {
 #ifndef NOSSN
@@ -8722,6 +8768,8 @@ static bool browse(char *ipath, int pkey)
 		handle_key_resize();
 
 begin:
+	fs_action = FS_BROWSE;
+	fs_delete_confirm = FALSE;
 	/*
 	 * Can fail when permissions change while browsing.
 	 * It's assumed that path IS a directory when we are here.
@@ -8824,7 +8872,34 @@ nochange:
 		if (presel)
 			presel = 0;
 
+		/* Timeouts preserve an open action; navigation cancels it immediately. */
+		if (sel && sel != SEL_FS_ACTION && sel != SEL_FS_ACCEPT && sel != SEL_REDRAW) {
+			fs_action = FS_BROWSE;
+			fs_delete_confirm = FALSE;
+		}
+
 		switch (sel) {
+		case SEL_FS_ACTION:
+			fs_active = TRUE;
+			fs_cycle(path);
+			goto statusbar_nochange;
+		case SEL_FS_ACCEPT:
+			fs_active = TRUE;
+			r = fs_accept(path);
+			if (r == 2)
+				return EXIT_SUCCESS;
+			if (r == 1)
+				goto setwatch_begin;
+			if (r == -1)
+				goto msgwait_nochange;
+			if (fs_action != FS_BROWSE || fs_delete_confirm)
+				goto statusbar_nochange;
+			/* Accept without an action only enters directories. */
+			if (r == 3 && ndents && (pdents[cur].flags & DIR_OR_DIRLNK)) {
+				sel = SEL_NAV_IN;
+				goto fs_enter;
+			}
+			goto statusbar_nochange;
 #ifndef NOMOUSE
 		case SEL_CLICK:
 			if (getmouse(&event) != OK)
@@ -8954,7 +9029,8 @@ nochange:
 			}
 #endif
 			// fallthrough
-		case SEL_NAV_IN: // fallthrough
+		case SEL_NAV_IN:
+fs_enter: // fallthrough
 		case SEL_OPEN:
 			/* Cannot descend in empty directories */
 			if (!ndents) {

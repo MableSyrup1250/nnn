@@ -122,6 +122,8 @@ enum action {
 #ifndef NOMOUSE
 	SEL_CLICK,
 #endif
+	SEL_FS_ACCEPT,
+	SEL_FS_ACTION,
 	SEL_MAX,
 };
 
@@ -132,6 +134,12 @@ struct key {
 };
 
 static struct key bindings[] = {
+	/* Artemis FS1..FS5 (F13..F17) */
+	{ KEY_F(13),      SEL_PREV },
+	{ KEY_F(14),      SEL_NEXT },
+	{ KEY_F(15),      SEL_BACK },
+	{ KEY_F(16),      SEL_FS_ACCEPT },
+	{ KEY_F(17),      SEL_FS_ACTION },
 	/* Back */
 	{ KEY_LEFT,       SEL_BACK },
 	{ 'h',            SEL_BACK },
